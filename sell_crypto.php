@@ -20,14 +20,12 @@ $approved_characters = get_approved_characters($_SESSION['user_id'], $conn);
 $errors = [];
 $success_message = "";
 
-// Variables pour l'achat
+// Variables pour la vente
 $selected_character_id = isset($_GET['character_id']) ? intval($_GET['character_id']) : null;
-$selected_crypto = isset($_GET['crypto']) ? $_GET['crypto'] : 'bitcoin';
+$selected_crypto = isset($_GET['crypto']) ? $_GET['crypto'] : null;
 
 // Initialiser les données de portefeuille
-$wallet_balance = 0;
 $portfolio = [];
-$transactions = [];
 
 // Si un personnage est sélectionné, récupérer ses données
 if ($selected_character_id) {
@@ -41,12 +39,9 @@ if ($selected_character_id) {
     }
     
     if (!$character_valid) {
-        header("Location: buy_crypto.php");
+        header("Location: sell_crypto.php");
         exit;
     }
-    
-    // Récupérer le solde du portefeuille
-    $wallet_balance = get_character_wallet_balance($selected_character_id, $conn);
     
     // Récupérer le portefeuille de cryptomonnaies
     $portfolio = get_character_crypto_portfolio($selected_character_id, $conn);
@@ -55,13 +50,14 @@ if ($selected_character_id) {
     $transactions = get_character_transactions($selected_character_id, $conn, 10);
 }
 
-// Traitement de l'achat
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
+// Traitement de la vente
+if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['sell_crypto'])) {
     // Vérifier que tous les champs sont présents
-    if (!isset($_POST['character_id']) || !isset($_POST['crypto_symbol']) || !isset($_POST['crypto_name']) || !isset($_POST['amount']) || !isset($_POST['price'])) {
-        $errors[] = "Tous les champs sont requis pour effectuer un achat.";
+    if (!isset($_POST['character_id']) || !isset($_POST['crypto_id']) || !isset($_POST['crypto_symbol']) || !isset($_POST['crypto_name']) || !isset($_POST['amount']) || !isset($_POST['price'])) {
+        $errors[] = "Tous les champs sont requis pour effectuer une vente.";
     } else {
         $character_id = intval($_POST['character_id']);
+        $crypto_id = intval($_POST['crypto_id']);
         $crypto_symbol = $_POST['crypto_symbol'];
         $crypto_name = $_POST['crypto_name'];
         $amount = floatval($_POST['amount']);
@@ -82,12 +78,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
             $errors[] = "La quantité doit être supérieure à zéro.";
         } else {
             try {
-                // Effectuer l'achat
-                buy_crypto($character_id, $crypto_symbol, $crypto_name, $amount, $price, $conn);
-                $success_message = "Achat réussi ! Vous avez acheté " . format_crypto($amount, $crypto_symbol) . " pour " . format_money($amount * $price) . ".";
+                // Effectuer la vente
+                sell_crypto($character_id, $crypto_id, $crypto_symbol, $crypto_name, $amount, $price, $conn);
+                $success_message = "Vente réussie ! Vous avez vendu " . format_crypto($amount, $crypto_symbol) . " pour " . format_money($amount * $price) . ".";
                 
                 // Mettre à jour les données
-                $wallet_balance = get_character_wallet_balance($character_id, $conn);
                 $portfolio = get_character_crypto_portfolio($character_id, $conn);
                 $transactions = get_character_transactions($character_id, $conn, 10);
             } catch (Exception $e) {
@@ -103,7 +98,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Achat de Cryptomonnaies - Système d'authentification</title>
+    <title>Vente de Cryptomonnaies - Système d'authentification</title>
     <!-- Intégration de Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -203,11 +198,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex justify-between items-center py-6">
                 <div class="flex items-center">
-                    <svg class="w-8 h-8 text-yellow-500" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                    <svg class="w-8 h-8 text-red-500" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
                         <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z"></path>
                         <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clip-rule="evenodd"></path>
                     </svg>
-                    <h1 class="ml-2 text-2xl font-bold text-gray-800 dark:text-white">Achat de Cryptomonnaies</h1>
+                    <h1 class="ml-2 text-2xl font-bold text-gray-800 dark:text-white">Vente de Cryptomonnaies</h1>
                 </div>
                 
                 <div class="flex items-center">
@@ -223,19 +218,17 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                         </label>
                     </div>
                     
-                    <a href="sell_crypto.php" class="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 mr-2">
-        Vendre des cryptos
-    </a>
-    
-    <a href="my_characters.php" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 mr-2">
-        Mes personnages
-    </a>
-    
-    <a href="dashboard.php" class="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200">
-        Retour au Dashboard
-    </a>
-
-    
+                    <a href="buy_crypto.php" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 mr-2">
+                        Acheter des cryptos
+                    </a>
+                    
+                    <a href="my_characters.php" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 mr-2">
+                        Mes personnages
+                    </a>
+                    
+                    <a href="dashboard.php" class="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200">
+                        Retour au Dashboard
+                    </a>
                 </div>
             </div>
         </div>
@@ -260,7 +253,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
         <?php endif; ?>
         
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <!-- Sélection du personnage et cryptomonnaie -->
+            <!-- Sélection du personnage -->
             <div class="lg:col-span-1">
                 <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden transition-colors duration-200 slide-in mb-6">
                     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -279,7 +272,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                             </a>
                         </div>
                         <?php else: ?>
-                        <form action="buy_crypto.php" method="GET" class="mb-4">
+                        <form action="sell_crypto.php" method="GET" class="mb-4">
                             <div class="mb-4">
                                 <label for="character_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Personnage</label>
                                 <select id="character_id" name="character_id" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white">
@@ -291,17 +284,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                                 </select>
                             </div>
                             
-                            <div class="mb-4">
-                                <label for="crypto" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Cryptomonnaie</label>
-                                <select id="crypto" name="crypto" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white">
-                                    <option value="bitcoin" <?php echo $selected_crypto == 'bitcoin' ? 'selected' : ''; ?>>Bitcoin (BTC)</option>
-                                    <option value="ethereum" <?php echo $selected_crypto == 'ethereum' ? 'selected' : ''; ?>>Ethereum (ETH)</option>
-                                    <option value="ripple" <?php echo $selected_crypto == 'ripple' ? 'selected' : ''; ?>>XRP (XRP)</option>
-                                    <option value="cardano" <?php echo $selected_crypto == 'cardano' ? 'selected' : ''; ?>>Cardano (ADA)</option>
-                                    <option value="solana" <?php echo $selected_crypto == 'solana' ? 'selected' : ''; ?>>Solana (SOL)</option>
-                                </select>
-                            </div>
-                            
                             <button type="submit" class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
                                 Sélectionner
                             </button>
@@ -309,28 +291,18 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                         <?php endif; ?>
                     </div>
                 </div>
-                
-                <?php if ($selected_character_id): ?>
+
+                <?php if ($selected_character_id && !empty($portfolio)): ?>
                 <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden transition-colors duration-200 slide-in">
                     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-                        <h2 class="text-xl font-medium text-gray-800 dark:text-white">Solde du portefeuille</h2>
+                        <h2 class="text-xl font-medium text-gray-800 dark:text-white">Mes cryptomonnaies</h2>
                     </div>
                     
                     <div class="p-6">
-                        <div class="text-center">
-                            <p class="text-sm text-gray-500 dark:text-gray-400">Argent disponible</p>
-                            <p class="text-3xl font-bold text-gray-800 dark:text-white"><?php echo format_money($wallet_balance); ?></p>
-                        </div>
-                        
-                        <div class="mt-6">
-                            <h3 class="text-lg font-medium text-gray-700 dark:text-gray-300 mb-3">Vos cryptomonnaies</h3>
-                            
-                            <?php if (empty($portfolio)): ?>
-                            <p class="text-gray-500 dark:text-gray-400 text-center py-4">Vous n'avez pas encore de cryptomonnaies.</p>
-                            <?php else: ?>
-                            <ul class="divide-y divide-gray-200 dark:divide-gray-700">
-                                <?php foreach ($portfolio as $crypto): ?>
-                                <li class="py-3">
+                        <ul class="divide-y divide-gray-200 dark:divide-gray-700">
+                            <?php foreach ($portfolio as $crypto): ?>
+                            <li class="py-3">
+                                <a href="sell_crypto.php?character_id=<?php echo $selected_character_id; ?>&crypto=<?php echo $crypto['id']; ?>" class="block hover:bg-gray-50 dark:hover:bg-gray-700 -mx-2 px-2 py-1 rounded transition-colors duration-150">
                                     <div class="flex justify-between">
                                         <div>
                                             <p class="text-sm font-medium text-gray-800 dark:text-white"><?php echo htmlspecialchars($crypto['crypto_name']); ?></p>
@@ -345,30 +317,49 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                                             </p>
                                         </div>
                                     </div>
-                                </li>
-                                <?php endforeach; ?>
-                            </ul>
-                            <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                                <div class="flex justify-between items-center">
-                                    <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Valeur totale</p>
-                                    <p class="text-lg font-bold text-gray-800 dark:text-white" id="total-portfolio-value">
-                                        <span class="loader inline-block h-4 w-4 border-2 border-gray-200 dark:border-gray-600 rounded-full"></span>
-                                    </p>
-                                </div>
+                                    <?php if (isset($_GET['crypto']) && $_GET['crypto'] == $crypto['id']): ?>
+                                    <div class="mt-2 text-center">
+                                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                                            Sélectionné
+                                        </span>
+                                    </div>
+                                    <?php endif; ?>
+                                </a>
+                            </li>
+                            <?php endforeach; ?>
+                        </ul>
+                        <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                            <div class="flex justify-between items-center">
+                                <p class="text-sm font-medium text-gray-700 dark:text-gray-300">Valeur totale</p>
+                                <p class="text-lg font-bold text-gray-800 dark:text-white" id="total-portfolio-value">
+                                    <span class="loader inline-block h-4 w-4 border-2 border-gray-200 dark:border-gray-600 rounded-full"></span>
+                                </p>
                             </div>
-                            <?php endif; ?>
                         </div>
                     </div>
                 </div>
                 <?php endif; ?>
             </div>
             
-            <!-- Achat de cryptomonnaie -->
+            <!-- Vente de cryptomonnaie -->
             <div class="lg:col-span-2">
-                <?php if ($selected_character_id): ?>
+                <?php 
+                // Si un personnage est sélectionné et une crypto est sélectionnée
+                if ($selected_character_id && $selected_crypto): 
+                    // Trouver la crypto sélectionnée dans le portefeuille
+                    $selected_crypto_data = null;
+                    foreach ($portfolio as $crypto) {
+                        if ($crypto['id'] == $selected_crypto) {
+                            $selected_crypto_data = $crypto;
+                            break;
+                        }
+                    }
+                    
+                    if ($selected_crypto_data):
+                ?>
                 <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden transition-colors duration-200 slide-in mb-6">
                     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-                        <h2 class="text-xl font-medium text-gray-800 dark:text-white">Acheter <span id="crypto-name">...</span></h2>
+                        <h2 class="text-xl font-medium text-gray-800 dark:text-white">Vendre <?php echo htmlspecialchars($selected_crypto_data['crypto_name']); ?></h2>
                     </div>
                     
                     <div class="p-6">
@@ -382,8 +373,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                             <div class="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
                                 <div class="flex justify-between items-center">
                                     <div>
-                                        <img id="crypto-icon" src="" alt="Crypto Icon" class="w-10 h-10 mr-2 inline-block">
-                                        <span id="crypto-symbol" class="text-xl font-bold text-gray-800 dark:text-white"></span>
+                                        <span id="crypto-symbol" class="text-xl font-bold text-gray-800 dark:text-white"><?php echo strtoupper($selected_crypto_data['crypto_symbol']); ?></span>
                                     </div>
                                     <div class="text-right">
                                         <p id="crypto-price" class="text-2xl font-bold text-gray-800 dark:text-white">
@@ -395,14 +385,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                             </div>
                         </div>
                         
-                        <form method="POST" action="buy_crypto.php" id="buy-form">
+                        <form method="POST" action="sell_crypto.php" id="sell-form">
                             <input type="hidden" name="character_id" value="<?php echo $selected_character_id; ?>">
-                            <input type="hidden" id="crypto_symbol" name="crypto_symbol" value="">
-                            <input type="hidden" id="crypto_name" name="crypto_name" value="">
+                            <input type="hidden" name="crypto_id" value="<?php echo $selected_crypto_data['id']; ?>">
+                            <input type="hidden" id="crypto_symbol" name="crypto_symbol" value="<?php echo $selected_crypto_data['crypto_symbol']; ?>">
+                            <input type="hidden" id="crypto_name" name="crypto_name" value="<?php echo $selected_crypto_data['crypto_name']; ?>">
                             <input type="hidden" id="price" name="price" value="">
                             
                             <div class="mb-4">
-                                <label for="amount" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Quantité à acheter</label>
+                                <label for="amount" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Quantité à vendre</label>
                                 <div class="mt-1 relative rounded-md shadow-sm">
                                     <input 
                                         type="number" 
@@ -410,38 +401,88 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                                         name="amount" 
                                         step="0.00000001" 
                                         min="0.00000001" 
+                                        max="<?php echo $selected_crypto_data['amount']; ?>"
                                         class="focus:ring-blue-500 focus:border-blue-500 block w-full pr-20 sm:text-sm border-gray-300 rounded-md dark:bg-gray-700 dark:border-gray-600 dark:text-white" 
                                         placeholder="0.00000000"
                                         required
                                     >
                                     <div class="absolute inset-y-0 right-0 flex items-center">
                                         <span id="currency-symbol" class="h-full inline-flex items-center px-3 border-l border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400 sm:text-sm">
-                                            BTC
+                                            <?php echo strtoupper($selected_crypto_data['crypto_symbol']); ?>
                                         </span>
                                     </div>
+                                </div>
+                                <div class="mt-1 flex justify-between">
+                                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                                        Disponible: <?php echo format_crypto($selected_crypto_data['amount'], $selected_crypto_data['crypto_symbol']); ?>
+                                    </p>
+                                    <button type="button" id="max-amount" class="text-xs text-blue-600 dark:text-blue-400">
+                                        Vendre tout
+                                    </button>
                                 </div>
                             </div>
                             
                             <div class="mb-6">
-                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Coût total</label>
+                                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Recette estimée</label>
                                 <div class="mt-1 bg-gray-50 dark:bg-gray-700 p-3 rounded-md">
-                                    <p id="total-cost" class="text-lg font-bold text-gray-800 dark:text-white">0,00 €</p>
+                                    <p id="total-value" class="text-lg font-bold text-gray-800 dark:text-white">0,00 €</p>
                                 </div>
-                                <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Votre solde: <span class="font-medium"><?php echo format_money($wallet_balance); ?></span></p>
                             </div>
                             
                             <button 
                                 type="submit" 
-                                name="buy_crypto" 
-                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 hover-scale"
+                                name="sell_crypto" 
+                                class="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 hover-scale"
                             >
-                                Acheter maintenant
+                                Vendre maintenant
                             </button>
                         </form>
                     </div>
                 </div>
+                <?php else: ?>
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 text-center transition-colors duration-200 slide-in mb-6">
+                    <svg class="w-16 h-16 mx-auto text-gray-400 dark:text-gray-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <h3 class="text-lg font-medium text-gray-900 dark:text-white">Aucune cryptomonnaie sélectionnée</h3>
+                    <p class="mt-1 text-gray-500 dark:text-gray-400">Veuillez sélectionner une cryptomonnaie de votre portefeuille pour la vendre.</p>
+                </div>
+                <?php endif; ?>
+                <?php elseif ($selected_character_id && empty($portfolio)): ?>
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 text-center transition-colors duration-200 slide-in mb-6">
+                    <svg class="w-16 h-16 mx-auto text-gray-400 dark:text-gray-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <h3 class="text-lg font-medium text-gray-900 dark:text-white">Portefeuille vide</h3>
+                    <p class="mt-1 text-gray-500 dark:text-gray-400">Vous n'avez pas encore de cryptomonnaies à vendre.</p>
+                    <div class="mt-4">
+                        <a href="buy_crypto.php?character_id=<?php echo $selected_character_id; ?>" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                            Acheter des cryptomonnaies
+                        </a>
+                    </div>
+                </div>
+                <?php elseif (!$selected_character_id): ?>
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 text-center transition-colors duration-200 slide-in mb-6">
+                    <svg class="w-16 h-16 mx-auto text-gray-400 dark:text-gray-600 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                    </svg>
+                    <h3 class="text-lg font-medium text-gray-900 dark:text-white">Sélectionnez un personnage</h3>
+                    <p class="mt-1 text-gray-500 dark:text-gray-400">Veuillez sélectionner un personnage pour voir son portefeuille de cryptomonnaies.
+
+
+
+
+
+
+                    Voici la suite et fin du fichier sell_crypto.php :
+
+```php
+                    </p>
+                </div>
+                <?php endif; ?>
                 
                 <!-- Historique des transactions -->
+                <?php if ($selected_character_id): ?>
                 <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden transition-colors duration-200 slide-in">
                     <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
                         <h2 class="text-xl font-medium text-gray-800 dark:text-white">Historique des transactions</h2>
@@ -555,7 +596,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
         // Variables pour les données crypto
         let cryptoData = null;
         let cryptoPrices = {};
-        let selectedCryptoId = '<?php echo $selected_crypto; ?>';
+        let selectedCryptoSymbol = '<?php echo $selected_crypto_data['crypto_symbol'] ?? ''; ?>';
         
         // Fonction pour formater les montants
         function formatMoney(amount) {
@@ -567,26 +608,15 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
             }).format(amount);
         }
         
-        // Fonction pour mettre à jour l'interface d'achat
-        function updateBuyInterface(data) {
+        // Fonction pour mettre à jour l'interface de vente
+        function updateSellInterface(data) {
             if (!data) return;
-            
-            // Mise à jour du nom et du symbole
-            document.getElementById('crypto-name').textContent = data.name;
-            document.getElementById('crypto-symbol').textContent = data.symbol.toUpperCase();
-            document.getElementById('currency-symbol').textContent = data.symbol.toUpperCase();
-            
-            // Mise à jour des champs cachés du formulaire
-            document.getElementById('crypto_symbol').value = data.id;
-            document.getElementById('crypto_name').value = data.name;
-            document.getElementById('price').value = data.current_price;
-            
-            // Mise à jour de l'icône
-            document.getElementById('crypto-icon').src = data.image;
-            document.getElementById('crypto-icon').alt = data.name;
             
             // Mise à jour du prix
             document.getElementById('crypto-price').textContent = formatMoney(data.current_price);
+            
+            // Mise à jour du champ caché du formulaire
+            document.getElementById('price').value = data.current_price;
             
             // Mise à jour du changement de prix
             const priceChange = data.price_change_percentage_24h;
@@ -599,22 +629,25 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
             
             // Mise à jour de la dernière mise à jour
             document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+            
+            // Mettre à jour les valeurs du portefeuille
+            updatePortfolioValues();
         }
         
-        // Fonction pour mettre à jour le coût total
-        function updateTotalCost() {
+        // Fonction pour mettre à jour la valeur totale de la vente
+        function updateTotalValue() {
             const amountInput = document.getElementById('amount');
-            const totalCostElement = document.getElementById('total-cost');
+            const totalValueElement = document.getElementById('total-value');
             const priceInput = document.getElementById('price');
             
-            if (amountInput.value && priceInput.value) {
+            if (amountInput && amountInput.value && priceInput && priceInput.value) {
                 const amount = parseFloat(amountInput.value);
                 const price = parseFloat(priceInput.value);
-                const totalCost = amount * price;
+                const totalValue = amount * price;
                 
-                totalCostElement.textContent = formatMoney(totalCost);
+                totalValueElement.textContent = formatMoney(totalValue);
             } else {
-                totalCostElement.textContent = formatMoney(0);
+                totalValueElement.textContent = formatMoney(0);
             }
         }
         
@@ -650,7 +683,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                         vs_currency: 'eur',
                         ids: 'bitcoin,ethereum,ripple,cardano,solana',
                         order: 'market_cap_desc',
-                        per_page: 5,
+                        per_page: 100,
                         page: 1,
                         sparkline: false,
                         price_change_percentage: '24h'
@@ -664,11 +697,11 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
                     cryptoPrices[crypto.id] = crypto.current_price;
                 });
                 
-                // Mettre à jour l'interface d'achat si un personnage est sélectionné
-                if (selectedCryptoId) {
-                    const selectedCrypto = cryptoData.find(crypto => crypto.id === selectedCryptoId);
+                // Mettre à jour l'interface de vente si une crypto est sélectionnée
+                if (selectedCryptoSymbol) {
+                    const selectedCrypto = cryptoData.find(crypto => crypto.id === selectedCryptoSymbol);
                     if (selectedCrypto) {
-                        updateBuyInterface(selectedCrypto);
+                        updateSellInterface(selectedCrypto);
                     }
                 }
                 
@@ -690,7 +723,16 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['buy_crypto'])) {
             // Écouter les changements de quantité
             const amountInput = document.getElementById('amount');
             if (amountInput) {
-                amountInput.addEventListener('input', updateTotalCost);
+                amountInput.addEventListener('input', updateTotalValue);
+            }
+            
+            // Bouton pour vendre tout
+            const maxAmountButton = document.getElementById('max-amount');
+            if (maxAmountButton && amountInput) {
+                maxAmountButton.addEventListener('click', function() {
+                    amountInput.value = amountInput.max;
+                    updateTotalValue();
+                });
             }
             
             // Rafraîchir les données toutes les 30 secondes

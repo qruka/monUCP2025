@@ -139,9 +139,20 @@ $characters = get_user_characters($_SESSION['user_id'], $conn);
                 </div>
                 
                 <a href="buy_crypto.php" class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200 mr-2">
-    Trader des cryptos
-</a>
+                    Trader des cryptos
+                </a>
 
+                <?php if ($character['status'] === 'approved'): ?>
+<div class="flex mt-4 space-x-2">
+    <a href="buy_crypto.php?character_id=<?php echo $character['id']; ?>" class="text-xs text-green-600 hover:text-green-800 dark:text-green-400 dark:hover:text-green-300 font-medium">
+        Acheter des cryptos
+    </a>
+    <span class="text-gray-300 dark:text-gray-600">|</span>
+    <a href="sell_crypto.php?character_id=<?php echo $character['id']; ?>" class="text-xs text-red-600 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 font-medium">
+        Vendre des cryptos
+    </a>
+</div>
+<?php endif; ?>
 
                 <div class="flex items-center">
                     <!-- Dark Mode Toggle -->

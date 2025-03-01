@@ -167,4 +167,93 @@ function format_money($amount) {
 function format_crypto($amount, $symbol) {
     return number_format($amount, 8, ',', ' ') . ' ' . strtoupper($symbol);
 }
+
+
+
+
+
+
+
+
+/**
+ * Vend de la cryptomonnaie pour un personnage
+ */
+function sell_crypto($character_id, $crypto_id, $crypto_symbol, $crypto_name, $amount, $price_per_unit, $conn) {
+    // Début de la transaction
+    $conn->begin_transaction();
+    
+    try {
+        // Calculer la valeur totale
+        $total_value = $amount * $price_per_unit;
+        
+        // Vérifier si le personnage possède suffisamment de cette cryptomonnaie
+        $stmt = $conn->prepare("SELECT amount FROM character_crypto WHERE id = ? AND character_id = ?");
+        $stmt->bind_param("ii", $crypto_id, $character_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        if ($result->num_rows !== 1) {
+            throw new Exception("Crypto-monnaie non trouvée dans votre portefeuille.");
+        }
+        
+        $crypto = $result->fetch_assoc();
+        if ($crypto['amount'] < $amount) {
+            throw new Exception("Quantité insuffisante. Vous possédez " . number_format($crypto['amount'], 8, ',', ' ') . " " . strtoupper($crypto_symbol) . ".");
+        }
+        
+        // Calculer le nouveau montant
+        $new_amount = $crypto['amount'] - $amount;
+        
+        // Mettre à jour ou supprimer l'entrée dans le portefeuille
+        if ($new_amount > 0) {
+            // Mettre à jour la quantité
+            $stmt = $conn->prepare("UPDATE character_crypto SET amount = ? WHERE id = ?");
+            $stmt->bind_param("di", $new_amount, $crypto_id);
+        } else {
+            // Supprimer l'entrée si la quantité est nulle
+            $stmt = $conn->prepare("DELETE FROM character_crypto WHERE id = ?");
+            $stmt->bind_param("i", $crypto_id);
+        }
+        $stmt->execute();
+        
+        // Mettre à jour le solde du portefeuille
+        $stmt = $conn->prepare("UPDATE characters SET wallet_balance = wallet_balance + ?, last_transaction = NOW() WHERE id = ?");
+        $stmt->bind_param("di", $total_value, $character_id);
+        $stmt->execute();
+        
+        // Enregistrer la transaction
+        $stmt = $conn->prepare("INSERT INTO crypto_transactions (character_id, transaction_type, crypto_symbol, crypto_name, amount, price_per_unit, total_value) VALUES (?, 'sell', ?, ?, ?, ?, ?)");
+        $stmt->bind_param("issddd", $character_id, $crypto_symbol, $crypto_name, $amount, $price_per_unit, $total_value);
+        $stmt->execute();
+        
+        // Valider la transaction
+        $conn->commit();
+        
+        return true;
+    } catch (Exception $e) {
+        // Annuler la transaction en cas d'erreur
+        $conn->rollback();
+        throw $e;
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ?>
+
+
