@@ -2,18 +2,18 @@
 // Initialiser la session
 session_start();
 
-// Vérifier si l'utilisateur est connecté, sinon le rediriger vers la page de connexion
+// Vérifier si l'utilisateur est connecté
 if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit;
 }
 
-// Inclure la connexion à la base de données et les utilitaires d'administration
+// Inclure la connexion à la base de données et les utilitaires
 require_once 'includes/db_connect.php';
-require_once 'includes/admin_utils.php';
-
-// Inclure les utilitaires utilisateur
+require_once 'includes/character_utils.php';
+require_once 'includes/crypto_utils.php';
 require_once 'includes/user_utils.php';
+
 
 // Mettre à jour l'activité de l'utilisateur
 if (isset($_SESSION['user_id'])) {
@@ -21,55 +21,227 @@ if (isset($_SESSION['user_id'])) {
 }
 
 
-// Vérifier si l'utilisateur est administrateur
-$is_admin = is_admin($_SESSION['user_id'], $conn);
+// Récupérer les personnages approuvés de l'utilisateur
+$approved_characters = get_approved_characters($_SESSION['user_id'], $conn);
 
-// Déterminer quelle section afficher (par défaut: index)
-$active_section = isset($_GET['section']) ? $_GET['section'] : 'index';
+// Récupérer les informations de l'utilisateur
+$user_query = "SELECT name, email, created_at, last_login FROM users WHERE id = ?";
+$stmt = $conn->prepare($user_query);
 
-// Obtenir le nombre total d'utilisateurs
-$user_count_query = "SELECT COUNT(*) as total FROM users";
-$user_count_result = $conn->query($user_count_query);
-$user_count = $user_count_result->fetch_assoc()['total'];
 
-// Obtenir le nombre total d'administrateurs
-$admin_count_query = "SELECT COUNT(*) as total FROM users WHERE is_admin = 1";
-$admin_count_result = $conn->query($admin_count_query);
-$admin_count = $admin_count_result->fetch_assoc()['total'];
+$stmt->bind_param("i", $_SESSION['user_id']);
+$stmt->execute();
+$result = $stmt->get_result();
+$user_info = $result->fetch_assoc();
 
-// Obtenir le dernier utilisateur inscrit
-$last_user_query = "SELECT name FROM users ORDER BY created_at DESC LIMIT 1";
-$last_user_result = $conn->query($last_user_query);
-$last_user = $last_user_result->fetch_assoc()['name'];
 
-// Gérer les formulaires de mise à jour des paramètres
-if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_settings'])) {
-    $email = $conn->real_escape_string($_POST["email"]);
-    $password = !empty($_POST["password"]) ? password_hash($_POST["password"], PASSWORD_DEFAULT) : null;
+/**
+ * Calcule le profit/perte global pour un personnage
+ */
+function calculate_profit_loss($character_id, $conn) {
+    // Récupérer le solde actuel
+    $query = "SELECT wallet_balance FROM characters WHERE id = ?";
+    $stmt = $conn->prepare($query);
+    $stmt->bind_param("i", $character_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $current_balance = $result->fetch_assoc()['wallet_balance'];
     
-    if ($password) {
-        $stmt = $conn->prepare("UPDATE users SET email = ?, password = ? WHERE id = ?");
-        $stmt->bind_param("ssi", $email, $password, $_SESSION['user_id']);
-    } else {
-        $stmt = $conn->prepare("UPDATE users SET email = ? WHERE id = ?");
-        $stmt->bind_param("si", $email, $_SESSION['user_id']);
+    // Récupérer la valeur actuelle du portefeuille
+    $portfolio = get_character_crypto_portfolio($character_id, $conn);
+    $portfolio_value = 0;
+    
+    // Obtenir les prix actuels des cryptomonnaies
+    $current_prices = get_current_crypto_prices();
+    
+    foreach ($portfolio as $crypto) {
+        if (isset($current_prices[$crypto['crypto_symbol']])) {
+            $portfolio_value += $crypto['amount'] * $current_prices[$crypto['crypto_symbol']];
+        }
     }
     
-    if ($stmt->execute()) {
-        $success_message = "Vos paramètres ont été mis à jour avec succès.";
-    } else {
-        $error_message = "Une erreur s'est produite lors de la mise à jour de vos paramètres.";
-    }
+    // La valeur totale est le solde actuel plus la valeur du portefeuille
+    $total_value = $current_balance + $portfolio_value;
+    
+    // Le solde initial selon votre base de données est 1000.00
+    $initial_balance = 1000.00;
+    
+    // Calculer le profit/perte
+    $profit_loss = $total_value - $initial_balance;
+    
+    return $profit_loss;
 }
 
-// Récupérer les détails de l'utilisateur
-$user_details = get_user_details($_SESSION['user_id'], $conn);
+/**
+ * Récupère le portefeuille de cryptomonnaies d'un personnage
+ */
 
-// Afficher la notification de changement d'IP si nécessaire
-if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
-    $ip_change_message = "Nous avons détecté une connexion depuis une nouvelle adresse IP. Si ce n'était pas vous, veuillez changer votre mot de passe immédiatement.";
-    // Réinitialiser la notification pour qu'elle ne s'affiche qu'une fois
-    $_SESSION["ip_change_notice"] = false;
+/**
+ * Récupère les prix actuels des cryptomonnaies
+ * Dans un cas réel, cette fonction ferait appel à une API externe
+ */
+function get_current_crypto_prices() {
+    return [
+        'bitcoin' => 62000.00,
+        'ethereum' => 3400.00,
+        'cardano' => 0.57,
+        'ripple' => 0.55,
+        'solana' => 145.00,
+        'dogecoin' => 0.12,
+        'polkadot' => 6.70,
+        'chainlink' => 15.20,
+        'litecoin' => 72.50,
+        'bnb' => 570.00
+    ];
+}
+
+
+// Sélectionner un personnage par défaut (le premier disponible)
+$selected_character_id = isset($_GET['character_id']) ? intval($_GET['character_id']) : 
+                        (count($approved_characters) > 0 ? $approved_characters[0]['id'] : null);
+
+// Initialiser les variables
+$portfolio = [];
+$wallet_balance = 0;
+$character_name = "";
+$total_value = 0;
+$profit_loss = 0;
+$recent_transactions = [];
+
+// Si un personnage est sélectionné, récupérer ses données
+if ($selected_character_id) {
+    // Vérifier que ce personnage appartient bien à l'utilisateur
+    $character_valid = false;
+    foreach ($approved_characters as $character) {
+        if ($character['id'] == $selected_character_id) {
+            $character_valid = true;
+            $character_name = $character['first_last_name'];
+            break;
+        }
+    }
+    
+    if (!$character_valid) {
+        header("Location: dashboard.php");
+        exit;
+    }
+    
+    // Récupérer le solde du portefeuille
+    $wallet_balance = get_character_wallet_balance($selected_character_id, $conn);
+    
+    // Récupérer le portefeuille de cryptomonnaies
+    $portfolio = get_character_crypto_portfolio($selected_character_id, $conn);
+    
+    // Récupérer les 5 dernières transactions
+    $recent_transactions = get_character_transactions($selected_character_id, $conn, 5);
+    
+    // Calculer le profit/perte
+    $profit_loss = calculate_profit_loss($selected_character_id, $conn);
+    
+    // Calculer la valeur totale
+    $portfolio_value = 0;
+    $current_prices = get_current_crypto_prices();
+    
+    foreach ($portfolio as $crypto) {
+        if (isset($current_prices[$crypto['crypto_symbol']])) {
+            $portfolio_value += $crypto['amount'] * $current_prices[$crypto['crypto_symbol']];
+        }
+    }
+    
+    $total_value = $wallet_balance + $portfolio_value;
+}
+
+// Générer des notifications (exemple fictif)
+$notifications = [
+    [
+        'type' => 'info',
+        'message' => 'Bienvenue sur votre tableau de bord cryptomonnaies',
+        'date' => date('Y-m-d H:i:s', strtotime('-1 hour')),
+        'read' => false
+    ]
+];
+
+// Si l'utilisateur a des personnages et que la dernière connexion date d'il y a plus d'un jour
+if (!empty($approved_characters) && isset($user_info['last_login']) && 
+    (strtotime($user_info['last_login']) < strtotime('-1 day'))) {
+    $notifications[] = [
+        'type' => 'alert',
+        'message' => 'Vous n\'avez pas vérifié votre portefeuille depuis plus de 24 heures',
+        'date' => date('Y-m-d H:i:s'),
+        'read' => false
+    ];
+}
+
+// Ajouter une notification relative au marché (simulée)
+$market_trend = rand(-1, 1);
+if ($market_trend > 0) {
+    $notifications[] = [
+        'type' => 'success',
+        'message' => 'Le marché des cryptomonnaies est en hausse aujourd\'hui',
+        'date' => date('Y-m-d H:i:s', strtotime('-3 hours')),
+        'read' => false
+    ];
+} elseif ($market_trend < 0) {
+    $notifications[] = [
+        'type' => 'warning',
+        'message' => 'Le marché des cryptomonnaies est en baisse aujourd\'hui',
+        'date' => date('Y-m-d H:i:s', strtotime('-3 hours')),
+        'read' => false
+    ];
+}
+
+// Récupérer les données du marché pour le Widget (données fictives)
+$market_data = [
+    'bitcoin' => [
+        'price' => 62000.00,
+        'change_24h' => 2.5,
+        'volume' => 28000000000
+    ],
+    'ethereum' => [
+        'price' => 3400.00,
+        'change_24h' => 1.8,
+        'volume' => 15000000000
+    ],
+    'cardano' => [
+        'price' => 0.57,
+        'change_24h' => -0.9,
+        'volume' => 1200000000
+    ],
+    'solana' => [
+        'price' => 145.00,
+        'change_24h' => 4.2,
+        'volume' => 4500000000
+    ]
+];
+
+// Fonctions utilitaires
+function time_elapsed_string($datetime, $full = false) {
+    $now = new DateTime;
+    $ago = new DateTime($datetime);
+    $diff = $now->diff($ago);
+
+    $diff->w = floor($diff->d / 7);
+    $diff->d -= $diff->w * 7;
+
+    $string = array(
+        'y' => 'an',
+        'm' => 'mois',
+        'w' => 'semaine',
+        'd' => 'jour',
+        'h' => 'heure',
+        'i' => 'minute',
+        's' => 'seconde',
+    );
+    
+    foreach ($string as $k => &$v) {
+        if ($diff->$k) {
+            $v = $diff->$k . ' ' . $v . ($diff->$k > 1 && $k != 'm' ? 's' : '');
+        } else {
+            unset($string[$k]);
+        }
+    }
+
+    if (!$full) $string = array_slice($string, 0, 1);
+    return $string ? 'il y a ' . implode(', ', $string) : 'à l\'instant';
 }
 ?>
 
@@ -78,7 +250,7 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard - Système d'authentification</title>
+    <title>Tableau de bord - Système de trading</title>
     <!-- Intégration de Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
@@ -98,12 +270,28 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
                             700: '#0369a1',
                             800: '#075985',
                             900: '#0c4a6e',
+                        },
+                        crypto: {
+                            bitcoin: '#f7931a',
+                            ethereum: '#627eea',
+                            litecoin: '#345d9d',
+                            ripple: '#006097',
+                            cardano: '#0033ad',
+                            solana: '#9945FF',
+                            dogecoin: '#C2A633',
+                            polkadot: '#E6007A',
+                            chainlink: '#2A5ADA',
+                            bnb: '#F3BA2F'
                         }
                     }
                 }
             }
         }
     </script>
+    <!-- Chart.js pour les graphiques -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Font Awesome pour les icônes -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
         /* Animations et transitions */
         .fade-in {
@@ -124,62 +312,14 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
             to { transform: translateY(0); opacity: 1; }
         }
         
-        /* Effet de survol amélioré pour les boutons */
+        /* Effet de survol amélioré pour les cartes */
         .hover-scale {
             transition: transform 0.3s ease, box-shadow 0.3s ease;
         }
         
         .hover-scale:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-        }
-        
-        /* Animation pour la barre latérale */
-        .sidebar {
-            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.3s ease;
-        }
-        
-        /* Animation pour les cartes */
-        .stat-card {
-            transition: all 0.3s ease;
-        }
-        
-        .stat-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 15px 30px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -7px rgba(0, 0, 0, 0.05);
-        }
-        
-        /* Effet de pulsation */
-        .pulse {
-            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
-        
-        @keyframes pulse {
-            0%, 100% {
-                opacity: 1;
-            }
-            50% {
-                opacity: 0.7;
-            }
-        }
-        
-        /* Effet de gradient animé */
-        .gradient-background {
-            background: linear-gradient(-45deg, #ee7752, #e73c7e, #23a6d5, #23d5ab);
-            background-size: 400% 400%;
-            animation: gradient 15s ease infinite;
-        }
-        
-        @keyframes gradient {
-            0% {
-                background-position: 0% 50%;
-            }
-            50% {
-                background-position: 100% 50%;
-            }
-            100% {
-                background-position: 0% 50%;
-            }
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
         }
         
         /* Toggle switch pour le dark mode */
@@ -190,156 +330,53 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
         .toggle-checkbox:checked + .toggle-label {
             background-color: #68D391;
         }
+        
+        /* Loading spinner */
+        .loader {
+            border-top-color: #3498db;
+            animation: spinner 1.5s linear infinite;
+        }
+        
+        @keyframes spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* Notification badge */
+        .notification-badge {
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            padding: 0.15rem 0.35rem;
+            border-radius: 9999px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            background-color: #EF4444;
+            color: white;
+            border: 2px solid white;
+        }
+        
+        .dark .notification-badge {
+            border-color: #1F2937;
+        }
     </style>
 </head>
 <body class="bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200 transition-colors duration-200">
-    <div class="flex h-screen">
-        <!-- Sidebar - version mobile (overlay sombre) -->
-        <div class="sidebar-overlay fixed inset-0 z-20 transition-opacity bg-black opacity-50 lg:hidden hidden"></div>
-
-        <!-- Sidebar -->
-        <div class="sidebar fixed inset-y-0 left-0 z-30 w-64 overflow-y-auto transform bg-white dark:bg-gray-800 lg:translate-x-0 lg:static lg:inset-0 -translate-x-full shadow-lg">
-            <div class="flex items-center justify-center mt-8">
+    <header class="bg-white dark:bg-gray-800 shadow-sm transition-colors duration-200">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between items-center py-6">
                 <div class="flex items-center">
-                    <div class="gradient-background text-white p-2 rounded-lg mr-2">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
-                        </svg>
-                    </div>
-                    <span class="mx-2 text-2xl font-semibold text-gray-800 dark:text-white">Dashboard</span>
+                    <svg class="w-8 h-8 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                    </svg>
+                    <h1 class="ml-2 text-2xl font-bold text-gray-800 dark:text-white">Tableau de Bord</h1>
+                    <?php if (!empty($character_name)) { ?>
+                    <span class="ml-4 text-sm bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300 py-1 px-3 rounded-full">
+                        <?php echo htmlspecialchars($character_name); ?>
+                    </span>
+                    <?php } ?>
                 </div>
-            </div>
-
-            <nav class="mt-10">
-                <a href="?section=index" class="flex items-center px-6 py-3 transition-all duration-200 <?php echo $active_section === 'index' ? 'bg-gray-200 dark:bg-gray-700 text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'; ?>">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path>
-                    </svg>
-                    <span class="mx-3">Accueil</span>
-                </a>
-
-                <a href="my_characters.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
-                </svg>
-                <span class="mx-3">Mes personnages</span>
-            </a>
-
-
-                <a href="?section=profile" class="flex items-center px-6 py-3 transition-all duration-200 <?php echo $active_section === 'profile' ? 'bg-gray-200 dark:bg-gray-700 text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'; ?>">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
-                    </svg>
-                    <span class="mx-3">Profil</span>
-                </a>
-
-                <a href="?section=settings" class="flex items-center px-6 py-3 transition-all duration-200 <?php echo $active_section === 'settings' ? 'bg-gray-200 dark:bg-gray-700 text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'; ?>">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                    </svg>
-                    <span class="mx-3">Paramètres</span>
-                </a>
-
-                <!-- Lien "Notre équipe" accessible à tous les utilisateurs -->
-                <a href="team.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path>
-                    </svg>
-                    <span class="mx-3">Notre équipe</span>
-                </a>
-
-                <a href="crypto_market.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z"></path>
-                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clip-rule="evenodd"></path>
-                </svg>
-                <span class="mx-3">Marché Crypto</span>
-                </a>
-
-
-                    <!-- Lien pour l'achat de cryptomonnaies -->
-<!-- Lien pour l'achat de cryptomonnaies -->
-<a href="buy_crypto.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-        <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z"></path>
-        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clip-rule="evenodd"></path>
-    </svg>
-    <span class="mx-3">Acheter des cryptos</span>
-</a>
-
-<!-- Lien pour la vente de cryptomonnaies -->
-<a href="sell_crypto.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-    <svg class="w-6 h-6" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
-        <path fill-rule="evenodd" d="M10 2a8 8 0 100 16 8 8 0 000-16zm1 11a1 1 0 11-2 0v-3.586l-1.293 1.293a1 1 0 01-1.414-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 9.414V13z" clip-rule="evenodd"></path>
-    </svg>
-    <span class="mx-3">Vendre des cryptos</span>
-</a>
-
-
-                <!-- Options d'administration (visibles uniquement pour les administrateurs) -->
-                <?php if ($is_admin): ?>
-                <div class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
-                    <h5 class="px-6 py-2 text-xs font-medium uppercase text-gray-500 dark:text-gray-400">Administration</h5>
-                    
-                    
-                    <?php if ($is_admin): ?>
-                    <div class="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
-                        <h5 class="px-6 py-2 text-xs font-medium uppercase text-gray-500 dark:text-gray-400">Administration</h5>
-                        
-                        <!-- ... autres liens d'administration ... -->
-                        
-
-                        <a href="?section=manage_users" class="flex items-center px-6 py-3 transition-all duration-200 <?php echo $active_section === 'manage_users' ? 'bg-gray-200 dark:bg-gray-700 text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'; ?>">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>
-                        </svg>
-                        <span class="mx-3">Gérer les utilisateurs</span>
-                    </a>
-
-                    
-                        <a href="admin_characters.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                            </svg>
-                            <span class="mx-3">Valider les personnages</span>
-                        </a>
-                    </div>
-                    <?php endif; ?>
-
-                    <!-- Nouveau lien pour les alertes de sécurité -->
-                    <a href="security_alerts.php" class="flex items-center px-6 py-3 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                        </svg>
-                        <span class="mx-3">Alertes de sécurité</span>
-                    </a>
-                </div>
-
                 
-                <?php endif; ?>
-
-                <a href="logout.php" class="flex items-center px-6 py-3 mt-4 transition-all duration-200 text-gray-600 dark:text-gray-300 hover:bg-red-100 dark:hover:bg-red-900 hover:text-red-700 dark:hover:text-red-300">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
-                    </svg>
-                    <span class="mx-3">Déconnexion</span>
-                </a>
-            </nav>
-        </div>
-
-        <div class="flex flex-col flex-1 overflow-hidden">
-            <!-- Header -->
-            <header class="flex items-center justify-between px-6 py-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 shadow-sm transition-colors duration-200">
-                <div class="flex items-center">
-                    <!-- Bouton pour afficher le menu sur mobile -->
-                    <button id="sidebarToggle" class="text-gray-500 dark:text-gray-400 focus:outline-none lg:hidden hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-200">
-                        <svg class="w-6 h-6" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <path d="M4 6H20M4 12H20M4 18H11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
-                        </svg>
-                    </button>
-                </div>
-
                 <div class="flex items-center">
                     <!-- Dark Mode Toggle -->
                     <div class="mr-6">
@@ -353,352 +390,504 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
                         </label>
                     </div>
                     
-                    <!-- User Info -->
-                    <div class="relative">
-                        <div class="flex items-center text-gray-700 dark:text-gray-300">
-                            <span class="mx-2 font-medium"><?php echo htmlspecialchars($_SESSION['user_name']); ?></span>
-                            <div class="w-10 h-10 overflow-hidden rounded-full bg-indigo-600 flex items-center justify-center text-white font-bold">
-                                <?php 
-                                    $initials = '';
-                                    $name_parts = explode(' ', $_SESSION['user_name']);
-                                    foreach ($name_parts as $part) {
-                                        $initials .= !empty($part) ? $part[0] : '';
-                                    }
-                                    echo htmlspecialchars(strtoupper(substr($initials, 0, 2)));
-                                ?>
+                    <!-- Notifications -->
+                    <div class="relative mr-6">
+                        <button id="notificationButton" class="relative text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300 focus:outline-none">
+                            <svg class="h-6 w-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"></path>
+                            </svg>
+                            <?php if (count($notifications) > 0) { ?>
+                            <span class="notification-badge"><?php echo count($notifications); ?></span>
+                            <?php } ?>
+                        </button>
+                        
+                        <!-- Dropdown menu pour les notifications -->
+                        <div id="notificationDropdown" class="hidden absolute right-0 mt-2 w-80 bg-white dark:bg-gray-800 rounded-md shadow-lg py-1 z-10">
+                            <div class="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+                                <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300">Notifications</h3>
+                            </div>
+                            <?php if (empty($notifications)) { ?>
+                            <div class="px-4 py-6 text-center text-gray-500 dark:text-gray-400">
+                                <p>Vous n'avez aucune notification</p>
+                            </div>
+                            <?php } else { ?>
+                            <div class="max-h-64 overflow-y-auto">
+                                <?php foreach ($notifications as $notification) { ?>
+                                <div class="px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors duration-150">
+                                    <div class="flex items-start">
+                                        <?php if ($notification['type'] === 'info') { ?>
+                                        <div class="flex-shrink-0 pt-0.5">
+                                            <svg class="h-5 w-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                        </div>
+                                        <?php } elseif ($notification['type'] === 'success') { ?>
+                                        <div class="flex-shrink-0 pt-0.5">
+                                            <svg class="h-5 w-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                        </div>
+                                        <?php } elseif ($notification['type'] === 'warning') { ?>
+                                        <div class="flex-shrink-0 pt-0.5">
+                                            <svg class="h-5 w-5 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                                            </svg>
+                                        </div>
+                                        <?php } elseif ($notification['type'] === 'alert') { ?>
+                                        <div class="flex-shrink-0 pt-0.5">
+                                            <svg class="h-5 w-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                        </div>
+                                        <?php } ?>
+                                        <div class="ml-3 w-0 flex-1">
+                                            <p class="text-sm text-gray-800 dark:text-gray-200"><?php echo $notification['message']; ?></p>
+                                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400"><?php echo time_elapsed_string($notification['date']); ?></p>
+                                        </div>
+                                        <div class="ml-4 flex-shrink-0 flex">
+                                            <button class="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300 focus:outline-none">
+                                                <span class="sr-only">Fermer</span>
+                                                <svg class="h-4 w-4" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                                                    <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd"></path>
+                                                </svg>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <?php } ?>
+                            </div>
+                            <div class="px-4 py-2 text-center border-t border-gray-200 dark:border-gray-700">
+                                <a href="#" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">Voir toutes les notifications</a>
+                            </div>
+                            <?php } ?>
+                        </div>
+                    </div>
+                    
+                    <!-- Menu Cryptos avec dropdown -->
+                    <div class="relative mr-2 inline-block text-left group">
+                        <button type="button" class="inline-flex justify-center items-center w-full px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors duration-200">
+                            <i class="fas fa-coins mr-1"></i> Cryptos
+                            <svg class="ml-1 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                            </svg>
+                        </button>
+                        <div class="origin-top-right absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-white dark:bg-gray-800 ring-1 ring-black ring-opacity-5 focus:outline-none z-50 hidden group-hover:block">
+                            <div class="py-1" role="menu" aria-orientation="vertical" aria-labelledby="options-menu">
+                                <a href="crypto_market.php" class="flex items-center px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" role="menuitem">
+                                    <i class="fas fa-chart-line mr-3 text-blue-500"></i>
+                                    <span>Marché des cryptos</span>
+                                </a>
+                                <a href="buy_crypto.php" class="flex items-center px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" role="menuitem">
+                                    <i class="fas fa-shopping-cart mr-3 text-green-500"></i>
+                                    <span>Acheter des cryptos</span>
+                                </a>
+                                <a href="sell_crypto.php" class="flex items-center px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" role="menuitem">
+                                    <i class="fas fa-exchange-alt mr-3 text-red-500"></i>
+                                    <span>Vendre des cryptos</span>
+                                </a>
+                                <a href="portfolio_analysis.php" class="flex items-center px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" role="menuitem">
+                                    <i class="fas fa-wallet mr-3 text-purple-500"></i>
+                                    <span>Consulter mon portefeuille</span>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Menu utilisateur avec dropdown -->
+                    <div class="relative ml-3 inline-block text-left group">
+                        <button type="button" class="inline-flex justify-center w-full rounded-md border border-gray-300 dark:border-gray-600 shadow-sm px-4 py-2 bg-white dark:bg-gray-700 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                            <span>Mon compte</span>
+                            <svg class="ml-2 -mr-1 h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                        <div class="origin-top-right absolute right-0 mt-2 w-56 rounded-md shadow-lg bg-white dark:bg-gray-800 ring-1 ring-black ring-opacity-5 focus:outline-none z-50 hidden group-hover:block">
+                            <div class="py-1" role="menu" aria-orientation="vertical" aria-labelledby="options-menu">
+                                <a href="profile.php" class="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" role="menuitem">
+                                    <svg class="mr-3 h-5 w-5 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
+                                    </svg>
+                                    Mon profil
+                                </a>
+                                <a href="settings.php" class="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700" role="menuitem">
+                                    <svg class="mr-3 h-5 w-5 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                    </svg>
+                                    Paramètres
+                                </a>
+                                <div class="border-t border-gray-100 dark:border-gray-700"></div>
+                                <a href="logout.php" class="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 text-red-600 dark:text-red-400" role="menuitem">
+                                    <svg class="mr-3 h-5 w-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+                                    </svg>
+                                    Déconnexion
+                                </a>
                             </div>
                         </div>
                     </div>
                 </div>
-            </header>
-
-            <!-- Contenu principal -->
-            <main class="flex-1 overflow-x-hidden overflow-y-auto bg-gray-100 dark:bg-gray-900 transition-colors duration-200">
-                <div class="container px-6 py-8 mx-auto">
-                    
-                    <?php if (isset($success_message)): ?>
-                    <div class="bg-green-100 dark:bg-green-900 border-l-4 border-green-500 text-green-700 dark:text-green-300 p-4 mb-4 rounded-md fade-in" role="alert">
-                        <p><?php echo $success_message; ?></p>
+            </div>
+        </div>
+    </header>
+    
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Sélection du personnage -->
+        <?php if (count($approved_characters) > 1) { ?>
+        <div class="mb-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4">
+                <h2 class="text-lg font-medium text-gray-900 dark:text-white mb-3">Sélectionner un personnage</h2>
+                <div class="flex flex-wrap gap-2">
+                    <?php foreach ($approved_characters as $character) { ?>
+                    <a href="?character_id=<?php echo $character['id']; ?>" class="inline-flex items-center px-3 py-1 border <?php echo $selected_character_id == $character['id'] ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-600' : 'border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300'; ?> rounded-md text-sm font-medium">
+                        <?php echo htmlspecialchars($character['first_last_name']); ?>
+                    </a>
+                    <?php } ?>
+                    <a href="create_character.php" class="inline-flex items-center px-3 py-1 border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-md text-sm font-medium">
+                        <svg class="mr-1 h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+                        </svg>
+                        Nouveau personnage
+                    </a>
+                </div>
+            </div>
+        </div>
+        <?php } ?>
+        
+        <?php if (empty($approved_characters)) { ?>
+        <!-- Aucun personnage créé -->
+        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8 text-center">
+            <div class="mb-4">
+                <svg class="mx-auto h-12 w-12 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"></path>
+                </svg>
+            </div>
+            <h2 class="text-xl font-medium text-gray-900 dark:text-white mb-2">Bienvenue sur la plateforme de trading</h2>
+            <p class="text-gray-500 dark:text-gray-400 mb-4">Pour commencer à trader des cryptomonnaies, vous devez d'abord créer un personnage.</p>
+            <a href="create_character.php" class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                Créer mon premier personnage
+            </a>
+        </div>
+        <?php } else if ($selected_character_id) { ?>
+        
+        <!-- Résumé du portefeuille -->
+        <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6 mb-8">
+            <!-- Carte 1: Valeur totale -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 hover-scale">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Valeur totale</p>
+                        <p class="text-2xl font-bold text-gray-900 dark:text-white"><?php echo number_format($total_value, 2, ',', ' '); ?> €</p>
                     </div>
-                    <?php endif; ?>
-                    
-                    <?php if (isset($error_message)): ?>
-                    <div class="bg-red-100 dark:bg-red-900 border-l-4 border-red-500 text-red-700 dark:text-red-300 p-4 mb-4 rounded-md fade-in" role="alert">
-                        <p><?php echo $error_message; ?></p>
+                    <div class="rounded-full p-3 bg-blue-100 dark:bg-blue-900">
+                        <svg class="h-6 w-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
                     </div>
-                    <?php endif; ?>
-                    
-                    <?php if (isset($ip_change_message)): ?>
-                    <div class="bg-yellow-100 dark:bg-yellow-900 border-l-4 border-yellow-500 text-yellow-700 dark:text-yellow-300 p-4 mb-4 rounded-md fade-in" role="alert">
-                        <div class="flex">
-                            <div class="flex-shrink-0">
-                                <svg class="h-5 w-5 text-yellow-500" viewBox="0 0 20 20" fill="currentColor">
-                                    <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
-                                </svg>
-                            </div>
-                            <div class="ml-3">
-                                <p><?php echo $ip_change_message; ?></p>
-                            </div>
+                </div>
+                <div class="mt-2">
+                    <div class="flex items-center">
+                        <span class="text-sm <?php echo $profit_loss >= 0 ? 'text-green-500' : 'text-red-500'; ?>">
+                            <?php echo $profit_loss >= 0 ? '+' : ''; ?><?php echo number_format($profit_loss, 2, ',', ' '); ?> €
+                        </span>
+                        <span class="text-xs text-gray-500 dark:text-gray-400 ml-1">
+                            (<?php echo number_format(($profit_loss / 10000) * 100, 2); ?>%)
+                        </span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Carte 2: Solde disponible -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 hover-scale">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Solde disponible</p>
+                        <p class="text-2xl font-bold text-gray-900 dark:text-white"><?php echo number_format($wallet_balance, 2, ',', ' '); ?> €</p>
+                    </div>
+                    <div class="rounded-full p-3 bg-green-100 dark:bg-green-900">
+                        <svg class="h-6 w-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z"></path>
+                        </svg>
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <a href="buy_crypto.php?character_id=<?php echo $selected_character_id; ?>" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+                        <i class="fas fa-arrow-right text-xs mr-1"></i> Acheter des cryptos
+                    </a>
+                </div>
+            </div>
+            
+            <!-- Carte 3: Cryptos détenues -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 hover-scale">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Cryptos détenues</p>
+                        <p class="text-2xl font-bold text-gray-900 dark:text-white"><?php echo count($portfolio); ?></p>
+                    </div>
+                    <div class="rounded-full p-3 bg-purple-100 dark:bg-purple-900">
+                        <svg class="h-6 w-6 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path>
+                        </svg>
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <a href="portfolio_analysis.php?character_id=<?php echo $selected_character_id; ?>" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+                        <i class="fas fa-chart-pie text-xs mr-1"></i> Voir la répartition
+                    </a>
+                </div>
+            </div>
+            
+            <!-- Carte 4: Performance sur 30j -->
+            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 hover-scale">
+                <div class="flex items-center justify-between">
+                    <div>
+                        <p class="text-sm font-medium text-gray-500 dark:text-gray-400">Performance sur 30j</p>
+                        <?php
+                        // Simulation d'une performance sur 30 jours
+                        $monthly_performance = (rand(-500, 800) / 100);
+                        ?>
+                        <p class="text-2xl font-bold <?php echo $monthly_performance >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'; ?>">
+                            <?php echo $monthly_performance >= 0 ? '+' : ''; ?><?php echo $monthly_performance; ?>%
+                        </p>
+                    </div>
+                    <div class="rounded-full p-3 <?php echo $monthly_performance >= 0 ? 'bg-green-100 dark:bg-green-900' : 'bg-red-100 dark:bg-red-900'; ?>">
+                        <svg class="h-6 w-6 <?php echo $monthly_performance >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'; ?>" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 8v8m-4-5v5m-4-2v2m-2 4h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                    </div>
+                </div>
+                <div class="mt-2">
+                    <a href="portfolio_analysis.php?character_id=<?php echo $selected_character_id; ?>&view=performance" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+                        <i class="fas fa-chart-line text-xs mr-1"></i> Analyser la performance
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Colonne gauche: Graphique d'évolution -->
+            <div class="lg:col-span-2">
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+                        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Évolution du portefeuille</h2>
+                        <div class="flex space-x-2">
+                            <button class="px-2 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 period-button active" data-period="7">7j</button>
+                            <button class="px-2 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 period-button" data-period="30">30j</button>
+                            <button class="px-2 py-1 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-md hover:bg-gray-200 dark:hover:bg-gray-600 period-button" data-period="90">90j</button>
                         </div>
                     </div>
-                    <?php endif; ?>
+                    <div class="p-6">
+                        <div class="h-64">
+                            <canvas id="portfolioChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Actions rapides -->
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
+                    <a href="buy_crypto.php?character_id=<?php echo $selected_character_id; ?>" class="flex flex-col items-center justify-center bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 hover-scale">
+                        <div class="rounded-full p-3 bg-green-100 dark:bg-green-900 mb-2">
+                            <svg class="h-6 w-6 text-green-600 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path>
+                            </svg>
+                        </div>
+                        <span class="text-sm font-medium text-gray-700 dark:text-gray-300">Acheter</span>
+                    </a>
                     
-                    <?php if ($active_section === 'index'): ?>
-                    <!-- Section Accueil -->
-                    <div class="slide-in">
-                        <h3 class="text-3xl font-medium text-gray-800 dark:text-white mb-6">Tableau de bord</h3>
-                        <div class="mt-4">
-                            <div class="flex flex-wrap -mx-6">
-                                <div class="w-full px-6 sm:w-1/2 xl:w-1/3">
-                                    <div class="flex items-center px-5 py-6 bg-white dark:bg-gray-800 rounded-lg shadow-sm stat-card hover-scale transition-colors duration-200">
-                                        <div class="p-3 bg-indigo-600 bg-opacity-75 rounded-full">
-                                            <svg class="w-8 h-8 text-white" viewBox="0 0 28 30" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                                <path d="M18.2 9.08889C18.2 11.5373 16.3196 13.5222 14 13.5222C11.6804 13.5222 9.8 11.5373 9.8 9.08889C9.8 6.64043 11.6804 4.65556 14 4.65556C16.3196 4.65556 18.2 6.64043 18.2 9.08889Z" fill="currentColor"/>
-                                                <path d="M25.2 12.0444C25.2 13.6768 23.9464 15 22.4 15C20.8536 15 19.6 13.6768 19.6 12.0444C19.6 10.4121 20.8536 9.08889 22.4 9.08889C23.9464 9.08889 25.2 10.4121 25.2 12.0444Z" fill="currentColor"/>
-                                                <path d="M19.6 22.3889C19.6 19.1243 17.0927 16.4778 14 16.4778C10.9072 16.4778 8.4 19.1243 8.4 22.3889V26.8222H19.6V22.3889Z" fill="currentColor"/>
-                                                <path d="M8.4 20.3333C8.4 18.0712 6.82133 16.2778 4.8 16.2778C2.77867 16.2778 1.2 18.0712 1.2 20.3333V26.8222H8.4V20.3333Z" fill="currentColor"/>
-                                                <path d="M25.2 20.3333C25.2 18.0712 23.6213 16.2778 21.6 16.2778C19.5787 16.2778 18 18.0712 18 20.3333V26.8222H25.2V20.3333Z" fill="currentColor"/>
-                                            </svg>
+                    <a href="sell_crypto.php?character_id=<?php echo $selected_character_id; ?>" class="flex flex-col items-center justify-center bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 hover-scale">
+                        <div class="rounded-full p-3 bg-red-100 dark:bg-red-900 mb-2">
+                            <svg class="h-6 w-6 text-red-600 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"></path>
+                            </svg>
+                        </div>
+                        <span class="text-sm font-medium text-gray-700 dark:text-gray-300">Vendre</span>
+                    </a>
+                    
+                    <a href="portfolio_analysis.php?character_id=<?php echo $selected_character_id; ?>" class="flex flex-col items-center justify-center bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 hover-scale">
+                        <div class="rounded-full p-3 bg-blue-100 dark:bg-blue-900 mb-2">
+                            <svg class="h-6 w-6 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                            </svg>
+                        </div>
+                        <span class="text-sm font-medium text-gray-700 dark:text-gray-300">Analyser</span>
+                    </a>
+                    
+                    <a href="crypto_market.php" class="flex flex-col items-center justify-center bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 hover-scale">
+                        <div class="rounded-full p-3 bg-purple-100 dark:bg-purple-900 mb-2">
+                            <svg class="h-6 w-6 text-purple-600 dark:text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path>
+                            </svg>
+                        </div>
+                        <span class="text-sm font-medium text-gray-700 dark:text-gray-300">Marché</span>
+                    </a>
+                </div>
+                
+                <!-- Dernières transactions -->
+                <div class="mt-6 bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Dernières transactions</h2>
+                    </div>
+                    <div class="divide-y divide-gray-200 dark:divide-gray-700">
+                        <?php if (empty($recent_transactions)) { ?>
+                            <div class="p-6 text-center text-gray-500 dark:text-gray-400">
+                                <p>Aucune transaction récente</p>
+                            </div>
+                        <?php } else { ?>
+                            <?php foreach ($recent_transactions as $tx) { ?>
+                            <div class="px-6 py-4">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center">
+                                        <div class="w-8 h-8 rounded-full flex items-center justify-center <?php echo $tx['transaction_type'] === 'buy' ? 'bg-green-100 dark:bg-green-900' : 'bg-red-100 dark:bg-red-900'; ?>">
+                                            <i class="fas <?php echo $tx['transaction_type'] === 'buy' ? 'fa-arrow-down text-green-600 dark:text-green-400' : 'fa-arrow-up text-red-600 dark:text-red-400'; ?>"></i>
                                         </div>
-                                        <div class="mx-5">
-                                            <h4 class="text-2xl font-semibold text-gray-700 dark:text-gray-200"><?php echo $user_count; ?></h4>
-                                            <div class="text-gray-500 dark:text-gray-400">Utilisateurs inscrits</div>
+                                        <div class="ml-4">
+                                            <p class="text-sm font-medium text-gray-900 dark:text-white">
+                                                <?php echo $tx['transaction_type'] === 'buy' ? 'Achat de' : 'Vente de'; ?> <?php echo htmlspecialchars($tx['crypto_name']); ?>
+                                            </p>
+                                            <p class="text-xs text-gray-500 dark:text-gray-400">
+                                                <?php echo date('d/m/Y H:i', strtotime($tx['transaction_date'])); ?>
+                                            </p>
                                         </div>
                                     </div>
-                                </div>
-                                <div class="w-full px-6 mt-6 sm:w-1/2 xl:w-1/3 sm:mt-0">
-                                    <div class="flex items-center px-5 py-6 bg-white dark:bg-gray-800 rounded-lg shadow-sm stat-card hover-scale transition-colors duration-200">
-                                        <div class="p-3 bg-green-600 bg-opacity-75 rounded-full">
-                                            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path>
-                                            </svg>
-                                        </div>
-                                        <div class="mx-5">
-                                            <h4 class="text-2xl font-semibold text-gray-700 dark:text-gray-200"><?php echo $admin_count; ?></h4>
-                                            <div class="text-gray-500 dark:text-gray-400">Administrateurs</div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="w-full px-6 mt-6 sm:w-1/2 xl:w-1/3 xl:mt-0">
-                                    <div class="flex items-center px-5 py-6 bg-white dark:bg-gray-800 rounded-lg shadow-sm stat-card hover-scale transition-colors duration-200">
-                                        <div class="p-3 bg-blue-600 bg-opacity-75 rounded-full">
-                                            <svg class="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path>
-                                            </svg>
-                                        </div>
-                                        <div class="mx-5">
-                                            <h4 class="text-2xl font-semibold text-gray-700 dark:text-gray-200 truncate"><?php echo htmlspecialchars($last_user); ?></h4>
-                                            <div class="text-gray-500 dark:text-gray-400">Dernier inscrit</div>
-                                        </div>
+                                    <div class="text-right">
+                                        <p class="text-sm font-medium <?php echo $tx['transaction_type'] === 'buy' ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'; ?>">
+                                            <?php echo $tx['transaction_type'] === 'buy' ? '-' : '+'; ?><?php echo number_format($tx['total_value'], 2, ',', ' '); ?> €
+                                        </p>
+                                        <p class="text-xs text-gray-500 dark:text-gray-400">
+                                            <?php echo number_format($tx['amount'], 8, ',', ' '); ?> <?php echo strtoupper($tx['crypto_symbol']); ?>
+                                        </p>
                                     </div>
                                 </div>
                             </div>
+                            <?php } ?>
+                            <div class="px-6 py-4 text-center">
+                                <a href="transaction_history.php?character_id=<?php echo $selected_character_id; ?>" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+                                    Voir toutes les transactions
+                                </a>
+                            </div>
+                        <?php } ?>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Colonne droite: Widgets -->
+            <div>
+                <!-- Widget: Marché des cryptos -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden mb-6">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Marché des cryptos</h2>
+                    </div>
+                    <div class="px-6 py-4">
+                        <?php foreach ($market_data as $symbol => $data) { ?>
+                        <div class="flex items-center justify-between py-2">
+                            <div class="flex items-center">
+                                <div class="h-8 w-8 rounded-full" style="background-color: <?php echo isset($portfolio_distribution_colors[$symbol]) ? $portfolio_distribution_colors[$symbol] . '40' : '#' . substr(md5($symbol), 0, 6) . '40'; ?>">
+                                    <div class="h-full w-full flex items-center justify-center">
+                                        <span class="text-xs font-medium" style="color: <?php echo isset($portfolio_distribution_colors[$symbol]) ? $portfolio_distribution_colors[$symbol] : '#' . substr(md5($symbol), 0, 6); ?>"><?php echo strtoupper(substr($symbol, 0, 3)); ?></span>
+                                    </div>
+                                </div>
+                                <div class="ml-3">
+                                    <p class="text-sm font-medium text-gray-900 dark:text-white"><?php echo ucfirst($symbol); ?></p>
+                                    <p class="text-xs text-gray-500 dark:text-gray-400"><?php echo strtoupper($symbol); ?></p>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-sm font-medium text-gray-900 dark:text-white"><?php echo number_format($data['price'], 2, ',', ' '); ?> €</p>
+                                <p class="text-xs <?php echo $data['change_24h'] >= 0 ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'; ?>">
+                                    <?php echo $data['change_24h'] >= 0 ? '+' : ''; ?><?php echo $data['change_24h']; ?>%
+                                </p>
+                            </div>
                         </div>
-                        
-                        <!-- Contenu informationnel -->
-                        <div class="mt-8 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm fade-in transition-colors duration-200">
-                            <h4 class="text-xl font-medium text-gray-700 dark:text-gray-200 mb-4">Bienvenue sur votre tableau de bord</h4>
-                            <p class="text-gray-600 dark:text-gray-400">
-                                Ce tableau de bord vous permet de gérer votre compte et d'accéder à toutes les fonctionnalités de notre système.
-                                Utilisez le menu latéral pour naviguer entre les différentes sections.
-                            </p>
-                            <div class="mt-4 p-4 bg-blue-50 dark:bg-blue-900 text-blue-700 dark:text-blue-300 rounded-md border border-blue-200 dark:border-blue-800">
-                                <div class="flex items-center">
-                                    <svg class="w-6 h-6 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <?php } ?>
+                    </div>
+                    <div class="px-6 py-4 border-t border-gray-200 dark:border-gray-700 text-center">
+                        <a href="crypto_market.php" class="text-sm text-blue-600 dark:text-blue-400 hover:underline">
+                            Voir tous les cours
+                        </a>
+                    </div>
+                </div>
+                
+                <!-- Widget: Répartition du portefeuille -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden mb-6">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Répartition du portefeuille</h2>
+                    </div>
+                    <div class="p-6">
+                        <?php if (empty($portfolio)) { ?>
+                        <div class="text-center py-4 text-gray-500 dark:text-gray-400">
+                            <p>Aucune cryptomonnaie dans votre portefeuille</p>
+                        </div>
+                        <?php } else { ?>
+                        <div class="h-48 mb-4">
+                            <canvas id="portfolioPieChart"></canvas>
+                        </div>
+                        <?php } ?>
+                    </div>
+                </div>
+                
+                <!-- Widget: Conseils -->
+                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+                    <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+                        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Conseils du jour</h2>
+                    </div>
+                    <div class="p-6">
+                        <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 mb-4">
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <svg class="h-5 w-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                     </svg>
-                                    <p>Vous êtes connecté en tant que <strong><?php echo htmlspecialchars($_SESSION['user_name']); ?></strong>. 
-                                    <?php if ($is_admin): ?>
-                                        <span class="bg-green-200 dark:bg-green-800 text-green-800 dark:text-green-200 text-xs font-semibold px-2 py-1 rounded-full ml-1">Administrateur</span>
-                                    <?php endif; ?>
-                                    </p>
+                                </div>
+                                <div class="ml-3">
+                                    <p class="text-sm text-blue-800 dark:text-blue-300">La diversification est la clé d'un portefeuille résilient. Ne mettez pas tous vos œufs dans le même panier.</p>
                                 </div>
                             </div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-
-                    <?php if ($active_section === 'profile'): ?>
-                    <!-- Section Profil -->
-                    <div class="slide-in">
-                        <h3 class="text-3xl font-medium text-gray-800 dark:text-white">Profil utilisateur</h3>
-                        <div class="mt-4 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm hover-scale transition-colors duration-200">
-                            <div class="flex flex-col sm:flex-row items-center">
-                                <div class="w-32 h-32 rounded-full gradient-background flex items-center justify-center text-white text-4xl font-bold mb-4 sm:mb-0 sm:mr-6 shadow-lg">
-                                    <?php 
-                                    $initials = '';
-                                    $name_parts = explode(' ', $_SESSION['user_name']);
-                                    foreach ($name_parts as $part) {
-                                        $initials .= !empty($part) ? $part[0] : '';
-                                    }
-                                    echo htmlspecialchars(strtoupper(substr($initials, 0, 2)));
-                                    ?>
-                                </div>
-                                <div>
-                                    <h3 class="text-xl font-medium text-gray-700 dark:text-gray-200"><?php echo htmlspecialchars($_SESSION['user_name']); ?></h3>
-                                    <p class="text-gray-500 dark:text-gray-400">Identifiant: <?php echo htmlspecialchars($_SESSION['user_id']); ?></p>
-                                    <p class="text-gray-500 dark:text-gray-400">Email: <?php echo htmlspecialchars($user_details['email'] ?? ''); ?></p>
-                                    <p class="text-gray-500 dark:text-gray-400">Membre depuis: <?php echo date('F Y', strtotime($user_details['created_at'] ?? 'now')); ?></p>
-                                    <?php if ($is_admin): ?>
-                                    <div class="mt-2">
-                                        <span class="bg-green-200 dark:bg-green-800 text-green-800 dark:text-green-200 text-sm font-semibold px-3 py-1 rounded-full">Administrateur</span>
-                                    </div>
-                                    <?php endif; ?>
-                                </div>
-                            </div>
-                            
-                            <div class="mt-6 border-t border-gray-200 dark:border-gray-700 pt-4 fade-in">
-                                <h4 class="text-lg font-medium text-gray-700 dark:text-gray-200 mb-2">Activité récente</h4>
-                                <div class="text-gray-600 dark:text-gray-400">
-                                    <p>Dernière connexion: <?php echo date('d/m/Y H:i'); ?></p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-
-                    <?php if ($active_section === 'settings'): ?>
-                    <!-- Section Paramètres -->
-                    <div class="slide-in">
-                        <h3 class="text-3xl font-medium text-gray-800 dark:text-white">Paramètres</h3>
-                        <div class="mt-4 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm hover-scale transition-colors duration-200">
-                            <h4 class="text-xl font-medium text-gray-700 dark:text-gray-200 mb-4">Paramètres du compte</h4>
-                            <form action="?section=settings" method="post">
-                                <div class="mb-4">
-                                    <label class="block text-gray-700 dark:text-gray-200 text-sm font-bold mb-2" for="username">
-                                        Nom complet
-                                    </label>
-                                    <p class="text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 p-3 rounded"><?php echo htmlspecialchars($_SESSION['user_name']); ?></p>
-                                    <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">Le nom d'utilisateur ne peut pas être modifié</p>
-                                </div>
-                                <div class="mb-4">
-                                    <label class="block text-gray-700 dark:text-gray-200 text-sm font-bold mb-2" for="email">
-                                        Email
-                                    </label>
-                                    <input 
-                                        class="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 dark:text-gray-200 dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline focus:ring-2 focus:ring-blue-500 transition-all duration-200" 
-                                        id="email" 
-                                        type="email" 
-                                        name="email" 
-                                        placeholder="Votre email"
-                                        value="<?php echo htmlspecialchars($user_details['email'] ?? ''); ?>"
-                                    >
-                                </div>
-                                <div class="mb-6">
-                                    <label class="block text-gray-700 dark:text-gray-200 text-sm font-bold mb-2" for="password">
-                                        Nouveau mot de passe
-                                    </label>
-                                    <input 
-                                        class="shadow appearance-none border rounded w-full py-3 px-4 text-gray-700 dark:text-gray-200 dark:bg-gray-700 dark:border-gray-600 leading-tight focus:outline-none focus:shadow-outline focus:ring-2 focus:ring-blue-500 transition-all duration-200" 
-                                        id="password" 
-                                        type="password" 
-                                        name="password" 
-                                        placeholder="Laissez vide pour conserver le mot de passe actuel"
-                                    >
-                                </div>
-                                <div class="flex items-center justify-between">
-                                    <button 
-                                        class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-lg focus:outline-none focus:shadow-outline transition-all duration-200 hover-scale" 
-                                        type="submit"
-                                        name="update_settings"
-                                    >
-                                        Enregistrer
-                                    </button>
-                                </div>
-                            </form>
                         </div>
                         
-                        <div class="mt-8 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-sm hover-scale fade-in transition-colors duration-200">
-                            <h4 class="text-xl font-medium text-gray-700 dark:text-gray-200 mb-4">Préférences d'affichage</h4>
-                            
-                            <div class="mb-4">
-                                <label class="block text-gray-700 dark:text-gray-200 text-sm font-bold mb-2">
-                                    Thème
-                                </label>
-                                <div class="mt-2">
-                                    <button id="lightModeBtn" class="px-4 py-2 mr-2 bg-gray-200 dark:bg-gray-700 rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors duration-200">
-                                        <span class="mr-2">☀️</span> Mode clair
-                                    </button>
-                                    <button id="darkModeBtn" class="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600 transition-colors duration-200">
-                                        <span class="mr-2">🌙</span> Mode sombre
-                                    </button>
+                        <div class="bg-yellow-50 dark:bg-yellow-900/20 rounded-lg p-4">
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <svg class="h-5 w-5 text-yellow-600 dark:text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                                    </svg>
+                                </div>
+                                <div class="ml-3">
+                                    <p class="text-sm text-yellow-800 dark:text-yellow-300">N'investissez que ce que vous êtes prêt à perdre. Le marché des cryptomonnaies est volatil.</p>
                                 </div>
                             </div>
                         </div>
                     </div>
-                    <?php endif; ?>
-                    
-                    <?php if ($active_section === 'manage_users' && $is_admin): ?>
-                    <!-- Section Gestion des utilisateurs (uniquement pour les administrateurs) -->
-                    <div class="slide-in">
-                        <h3 class="text-3xl font-medium text-gray-800 dark:text-white mb-6">Gestion des utilisateurs</h3>
-                        
-                        <div class="bg-white dark:bg-gray-800 shadow-md rounded-lg overflow-hidden transition-colors duration-200">
-                            <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 font-medium text-gray-700 dark:text-gray-200">
-                                Liste des utilisateurs
-                            </div>
-                            
-                            <div class="overflow-x-auto">
-                                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                                    <thead class="bg-gray-50 dark:bg-gray-800">
-                                        <tr>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">ID</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Nom</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Email</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Date d'inscription</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Statut</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                                        <?php 
-                                        $users = get_all_users($conn);
-                                        foreach ($users as $user):
-                                        ?>
-                                        <tr class="hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors duration-150">
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400"><?php echo $user['id']; ?></td>
-                                            <td class="px-6 py-4 whitespace-nowrap">
-                                                <div class="flex items-center">
-                                                    <div class="flex-shrink-0 h-10 w-10 bg-indigo-600 rounded-full flex items-center justify-center text-white">
-                                                        <?php 
-                                                        $initials = '';
-                                                        $name_parts = explode(' ', $user['name']);
-                                                        foreach ($name_parts as $part) {
-                                                            $initials .= !empty($part) ? $part[0] : '';
-                                                        }
-                                                        echo htmlspecialchars(strtoupper(substr($initials, 0, 2)));
-                                                        ?>
-                                                    </div>
-                                                    <div class="ml-4">
-                                                        <div class="text-sm font-medium text-gray-900 dark:text-white"><?php echo htmlspecialchars($user['name']); ?></div>
-                                                    </div>
-                                                </div>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400"><?php echo htmlspecialchars($user['email']); ?></td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400"><?php echo date('d/m/Y', strtotime($user['created_at'])); ?></td>
-                                            <td class="px-6 py-4 whitespace-nowrap">
-                                                <?php if ($user['is_admin']): ?>
-                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 dark:bg-green-800 text-green-800 dark:text-green-200">
-                                                    Administrateur
-                                                </span>
-                                                <?php else: ?>
-                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200">
-                                                    Utilisateur
-                                                </span>
-                                                <?php endif; ?>
-                                                
-                                                <?php if (isset($user['is_banned']) && $user['is_banned']): ?>
-                                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 dark:bg-red-800 text-red-800 dark:text-red-200 ml-1">
-                                                    Banni
-                                                </span>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                                                <form action="admin_actions.php" method="post" class="inline">
-                                                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                                                    <?php if ($user['is_admin']): ?>
-                                                    <input type="hidden" name="action" value="remove_admin">
-                                                    <button type="submit" class="text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300 mr-3">Révoquer admin</button>
-                                                    <?php else: ?>
-                                                    <input type="hidden" name="action" value="make_admin">
-                                                    <button type="submit" class="text-green-600 dark:text-green-400 hover:text-green-900 dark:hover:text-green-300 mr-3">Nommer admin</button>
-                                                    <?php endif; ?>
-                                                </form>
-                                                
-                                                <!-- Bouton pour accéder à la page de gestion avancée -->
-                                                <a href="manage_user.php?id=<?php echo $user['id']; ?>" class="text-blue-600 dark:text-blue-400 hover:text-blue-900 dark:hover:text-blue-300 mr-3">
-                                                    Gérer
-                                                </a>
-                                                
-                                                <?php if ($user['id'] != $_SESSION['user_id']): ?>
-                                                <form action="admin_actions.php" method="post" class="inline" onsubmit="return confirm('Êtes-vous sûr de vouloir supprimer cet utilisateur ?');">
-                                                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                                                    <input type="hidden" name="action" value="delete_user">
-                                                    <button type="submit" class="text-red-600 dark:text-red-400 hover:text-red-900 dark:hover:text-red-300">Supprimer</button>
-                                                </form>
-                                                <?php endif; ?>
-                                            </td>
-                                        </tr>
-                                        <?php endforeach; ?>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-                    <?php endif; ?>
-                    
                 </div>
-            </main>
+            </div>
         </div>
-    </div>
-
-    <!-- Script pour le menu mobile et les animations -->
+        <?php } ?>
+    </main>
+    
+    <footer class="bg-white dark:bg-gray-800 py-6 transition-colors duration-200 mt-12">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex flex-col md:flex-row justify-between items-center">
+                <p class="text-center text-gray-500 dark:text-gray-400 text-sm mb-4 md:mb-0">
+                    Plateforme de simulation de trading de cryptomonnaies
+                </p>
+                <div class="flex space-x-4">
+                    <a href="#" class="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300">
+                        <i class="fab fa-twitter"></i>
+                    </a>
+                    <a href="#" class="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300">
+                        <i class="fab fa-github"></i>
+                    </a>
+                    <a href="#" class="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300">
+                        <i class="fas fa-envelope"></i>
+                    </a>
+                </div>
+            </div>
+        </div>
+    </footer>
+    
     <script>
         // Gestion du mode sombre
         const html = document.querySelector('html');
         const darkModeToggle = document.getElementById('darkModeToggle');
-        const lightModeBtn = document.getElementById('lightModeBtn');
-        const darkModeBtn = document.getElementById('darkModeBtn');
         
         // Vérifier le mode actuel
         const isDarkMode = () => {
@@ -716,6 +905,7 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
                 html.classList.remove('dark');
                 darkModeToggle.checked = false;
             }
+            updateChartsTheme();
         };
         
         // Basculer le mode
@@ -728,56 +918,262 @@ if (isset($_SESSION["ip_change_notice"]) && $_SESSION["ip_change_notice"]) {
             applyTheme();
         };
         
-        // Activer le mode sombre
-        const enableDarkMode = () => {
-            localStorage.setItem('darkMode', 'true');
-            applyTheme();
-        };
-        
-        // Activer le mode clair
-        const enableLightMode = () => {
-            localStorage.setItem('darkMode', 'false');
-            applyTheme();
-        };
-        
         // Appliquer le thème au chargement
         applyTheme();
         
         // Écouter les changements de mode
         darkModeToggle.addEventListener('change', toggleDarkMode);
         
-        // Boutons de mode spécifique
-        if (lightModeBtn) lightModeBtn.addEventListener('click', enableLightMode);
-        if (darkModeBtn) darkModeBtn.addEventListener('click', enableDarkMode);
+        // Gestion du menu notifications
+        const notificationButton = document.getElementById('notificationButton');
+        const notificationDropdown = document.getElementById('notificationDropdown');
         
-        // Gestion du menu mobile
-        const sidebarToggle = document.getElementById('sidebarToggle');
-        const sidebar = document.querySelector('.sidebar');
-        const sidebarOverlay = document.querySelector('.sidebar-overlay');
-
-        // Fonction pour ouvrir le menu
-        const openSidebar = () => {
-            sidebar.classList.remove('-translate-x-full');
-            sidebarOverlay.classList.remove('hidden');
-        };
-
-        // Fonction pour fermer le menu
-        const closeSidebar = () => {
-            sidebar.classList.add('-translate-x-full');
-            sidebarOverlay.classList.add('hidden');
-        };
-
-        // Gestionnaires d'événements
-        sidebarToggle.addEventListener('click', openSidebar);
-        sidebarOverlay.addEventListener('click', closeSidebar);
+        if (notificationButton && notificationDropdown) {
+            notificationButton.addEventListener('click', () => {
+                notificationDropdown.classList.toggle('hidden');
+            });
+            
+            // Fermer le dropdown si on clique ailleurs
+            document.addEventListener('click', (event) => {
+                if (!notificationButton.contains(event.target) && !notificationDropdown.contains(event.target)) {
+                    notificationDropdown.classList.add('hidden');
+                }
+            });
+        }
         
-        // Animation des cartes statistiques au chargement
-        document.addEventListener('DOMContentLoaded', function() {
-            const statCards = document.querySelectorAll('.stat-card');
-            statCards.forEach((card, index) => {
-                setTimeout(() => {
-                    card.classList.add('fade-in');
-                }, index * 100);
+        // Fonction pour mettre à jour les thèmes des graphiques
+        function updateChartsTheme() {
+            const textColor = isDarkMode() ? '#e5e7eb' : '#374151';
+            const gridColor = isDarkMode() ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+            
+            if (window.portfolioChart) {
+                window.portfolioChart.options.scales.x.ticks.color = textColor;
+                window.portfolioChart.options.scales.y.ticks.color = textColor;
+                window.portfolioChart.options.scales.x.grid.color = gridColor;
+                window.portfolioChart.options.scales.y.grid.color = gridColor;
+                window.portfolioChart.update();
+            }
+            
+            if (window.portfolioPieChart) {
+                window.portfolioPieChart.update();
+            }
+        }
+        
+        // Initialisation des graphiques
+        document.addEventListener('DOMContentLoaded', () => {
+            <?php if ($selected_character_id) { ?>
+            // Données simulées pour le graphique d'évolution
+            const generateChartData = (days) => {
+                const data = [];
+                const labels = [];
+                
+                let currentDate = new Date();
+                const initialValue = 10000;
+                let currentValue = <?php echo $total_value; ?>;
+                
+                // Calculer le changement par jour pour atteindre la valeur actuelle
+                const dailyChange = Math.pow((currentValue / initialValue), 1/days) - 1;
+                
+                for (let i = days; i >= 0; i--) {
+                    const date = new Date(currentDate);
+                    date.setDate(date.getDate() - i);
+                    labels.push(date.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }));
+                    
+                    // Ajouter de l'aléatoire pour rendre le graphique plus réaliste
+                    const noise = 1 + (Math.random() * 0.04 - 0.02); // +/- 2%
+                    const value = initialValue * Math.pow((1 + dailyChange), days - i) * noise;
+                    data.push(value);
+                }
+                
+                return { labels, data };
+            };
+            
+            // Graphique d'évolution du portefeuille
+            const portfolioChartCtx = document.getElementById('portfolioChart');
+            if (portfolioChartCtx) {
+                const chartData = generateChartData(7); // 7 jours par défaut
+                
+                window.portfolioChart = new Chart(portfolioChartCtx, {
+                    type: 'line',
+                    data: {
+                        labels: chartData.labels,
+                        datasets: [{
+                            label: 'Valeur du portefeuille',
+                            data: chartData.data,
+                            fill: {
+                                target: 'origin',
+                                above: isDarkMode() ? 'rgba(59, 130, 246, 0.1)' : 'rgba(59, 130, 246, 0.2)',
+                            },
+                            borderColor: '#3B82F6',
+                            tension: 0.3,
+                            pointRadius: 2,
+                            pointHoverRadius: 5
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                grid: {
+                                    color: isDarkMode() ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
+                                },
+                                ticks: {
+                                    color: isDarkMode() ? '#e5e7eb' : '#374151'
+                                }
+                            },
+                            y: {
+                                grid: {
+                                    color: isDarkMode() ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)'
+                                },
+                                ticks: {
+                                    color: isDarkMode() ? '#e5e7eb' : '#374151',
+                                    callback: function(value) {
+                                        return new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
+                                    }
+                                }
+                            }
+                        },
+                        plugins: {
+                            legend: {
+                                display: false
+                            },
+                            tooltip: {
+                                backgroundColor: isDarkMode() ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)',
+                                titleColor: isDarkMode() ? '#e5e7eb' : '#111827',
+                                bodyColor: isDarkMode() ? '#e5e7eb' : '#111827',
+                                borderColor: isDarkMode() ? 'rgba(75, 85, 99, 0.3)' : 'rgba(203, 213, 225, 1)',
+                                borderWidth: 1,
+                                callbacks: {
+                                    label: function(context) {
+                                        let label = context.dataset.label || '';
+                                        if (label) {
+                                            label += ': ';
+                                        }
+                                        if (context.parsed.y !== null) {
+                                            label += new Intl.NumberFormat('fr-FR', { style: 'currency', currency: 'EUR' }).format(context.parsed.y);
+                                        }
+                                        return label;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                
+                // Gestion des boutons de période
+                const periodButtons = document.querySelectorAll('.period-button');
+                periodButtons.forEach(button => {
+                    button.addEventListener('click', () => {
+                        // Mettre à jour l'apparence des boutons
+                        periodButtons.forEach(btn => btn.classList.remove('active', 'bg-blue-500', 'text-white'));
+                        button.classList.add('active', 'bg-blue-500', 'text-white');
+                        
+                        // Mettre à jour les données du graphique
+                        const days = parseInt(button.dataset.period);
+                        const newChartData = generateChartData(days);
+                        
+                        window.portfolioChart.data.labels = newChartData.labels;
+                        window.portfolioChart.data.datasets[0].data = newChartData.data;
+                        window.portfolioChart.update();
+                    });
+                });
+            }
+            
+            // Graphique de répartition (camembert)
+            const portfolioPieChartCtx = document.getElementById('portfolioPieChart');
+            if (portfolioPieChartCtx) {
+                <?php
+                // Préparer les données pour le graphique de répartition
+                $portfolio_distribution_labels = [];
+                $portfolio_distribution_data = [];
+                $portfolio_distribution_colors_array = [];
+                
+                if (!empty($portfolio)) {
+                    $total_value = 0;
+                    foreach ($portfolio as $crypto) {
+                        if (isset($current_prices[$crypto['crypto_symbol']])) {
+                            $total_value += $crypto['amount'] * $current_prices[$crypto['crypto_symbol']];
+                        }
+                    }
+                    
+                    foreach ($portfolio as $crypto) {
+                        if (isset($current_prices[$crypto['crypto_symbol']])) {
+                            $value = $crypto['amount'] * $current_prices[$crypto['crypto_symbol']];
+                            $portfolio_distribution_labels[] = $crypto['crypto_name'];
+                            $portfolio_distribution_data[] = ($total_value > 0) ? ($value / $total_value) * 100 : 0;
+                            
+                            $color = isset($portfolio_distribution_colors[$crypto['crypto_symbol']]) 
+                                ? $portfolio_distribution_colors[$crypto['crypto_symbol']] 
+                                : '#' . substr(md5($crypto['crypto_symbol']), 0, 6);
+                                
+                            $portfolio_distribution_colors_array[] = $color;
+                        }
+                    }
+                }
+                ?>
+                
+                <?php if (!empty($portfolio_distribution_labels)) { ?>
+                window.portfolioPieChart = new Chart(portfolioPieChartCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: <?php echo json_encode($portfolio_distribution_labels); ?>,
+                        datasets: [{
+                            data: <?php echo json_encode($portfolio_distribution_data); ?>,
+                            backgroundColor: <?php echo json_encode($portfolio_distribution_colors_array); ?>,
+                            borderWidth: 1,
+                            borderColor: isDarkMode() ? '#1f2937' : '#ffffff',
+                            hoverOffset: 10
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        cutout: '65%',
+                        plugins: {
+                            legend: {
+                                position: 'right',
+                                labels: {
+                                    color: isDarkMode() ? '#e5e7eb' : '#374151',
+                                    font: {
+                                        size: 10
+                                    },
+                                    boxWidth: 10,
+                                    padding: 10,
+                                    usePointStyle: true,
+                                    pointStyle: 'circle'
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: isDarkMode() ? 'rgba(30, 41, 59, 0.9)' : 'rgba(255, 255, 255, 0.9)',
+                                titleColor: isDarkMode() ? '#e5e7eb' : '#111827',
+                                bodyColor: isDarkMode() ? '#e5e7eb' : '#111827',
+                                borderColor: isDarkMode() ? 'rgba(75, 85, 99, 0.3)' : 'rgba(203, 213, 225, 1)',
+                                borderWidth: 1,
+                                callbacks: {
+                                    label: function(context) {
+                                        return `${context.label}: ${context.parsed.toFixed(2)}%`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                <?php } ?>
+            }
+            <?php } ?>
+            
+            // Animation des cartes
+            const cards = document.querySelectorAll('.hover-scale');
+            cards.forEach(card => {
+                card.addEventListener('mouseenter', () => {
+                    card.style.transform = 'translateY(-5px)';
+                    card.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)';
+                });
+                card.addEventListener('mouseleave', () => {
+                    card.style.transform = 'translateY(0)';
+                    card.style.boxShadow = '';
+                });
             });
         });
     </script>
