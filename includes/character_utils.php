@@ -92,4 +92,21 @@ function can_view_character($user_id, $character_id, $is_admin, $conn) {
     // Les utilisateurs ne peuvent voir que leurs propres personnages
     return $character['user_id'] == $user_id;
 }
+
+/**
+ * Récupère tous les personnages approuvés d'un utilisateur
+ */
+function get_approved_characters($user_id, $conn) {
+    $stmt = $conn->prepare("SELECT * FROM characters WHERE user_id = ? AND status = 'approved' ORDER BY first_last_name ASC");
+    $stmt->bind_param("i", $user_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    
+    $characters = [];
+    while ($row = $result->fetch_assoc()) {
+        $characters[] = $row;
+    }
+    
+    return $characters;
+}
 ?>
